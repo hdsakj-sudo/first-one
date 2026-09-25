@@ -1,0 +1,12 @@
+{
+  "name": "dual-agent-p3-target-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "scripts": {
+    "test": "node --test"
+  }
+}

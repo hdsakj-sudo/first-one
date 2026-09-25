@@ -1,0 +1,10 @@
+.local/
+node_modules/
+coverage/
+.env
+.env.*
+auth.json
+*.pem
+*.key
+*.p7m
+*.pfx
