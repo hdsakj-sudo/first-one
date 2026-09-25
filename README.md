@@ -27,5 +27,10 @@ npm test
 git diff --check
 ```
 
-本地基线测试只校验冻结契约。完成两个实现任务后，还须在独立验收阶段运行
-provider/display 自测与组合测试，并记录输入 SHA、CI run、整合 SHA 和树哈希。
+本地基线测试只校验冻结契约。完成两个实现任务后，在独立验收阶段运行：
+
+```powershell
+node acceptance/run.mjs .
+```
+
+该命令必须真实调用两个模块，并记录输入 SHA、CI run、整合 SHA 和树哈希。
