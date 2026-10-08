@@ -1,0 +1,129 @@
+name: P3 fixed-batch integration evidence
+
+on:
+  push:
+    branches:
+      - 'task/TASK-1003/TASK-1003-A2'
+
+permissions:
+  contents: read
+
+jobs:
+  independent-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out CI branch without write credentials
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Use frozen Node major version
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: Verify fixed candidates and write structured evidence
+        shell: bash
+        env:
+          BASE_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
+          PROVIDER_SHA: e43b9ce247fb73754887ecb3dd220a866236f9ab
+          DISPLAY_SHA: 349b4d6b456a8c0b89a72c8f2bf5c31d3d16544e
+          P3_BATCH_ID: BATCH-1003
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A2'
+          [[ "$(node --version)" =~ ^v22\. ]]
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_SHA"
+
+          git fetch --no-tags origin \
+            refs/heads/task/TASK-1001/TASK-1001-A4:refs/remotes/origin/task/TASK-1001/TASK-1001-A4 \
+            refs/heads/task/TASK-1002/TASK-1002-A3:refs/remotes/origin/task/TASK-1002/TASK-1002-A3
+          test "$(git rev-parse refs/remotes/origin/task/TASK-1001/TASK-1001-A4)" = "$PROVIDER_SHA"
+          test "$(git rev-parse refs/remotes/origin/task/TASK-1002/TASK-1002-A3)" = "$DISPLAY_SHA"
+          for head in "$PROVIDER_SHA" "$DISPLAY_SHA"; do
+            git merge-base --is-ancestor "$BASE_SHA" "$head"
+          done
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/provider/*|tests/provider/*) ;;
+              *) echo "Provider changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$BASE_SHA" "$PROVIDER_SHA")
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/display/*|tests/display/*) ;;
+              *) echo "Display changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$BASE_SHA" "$DISPLAY_SHA")
+
+          candidate="$RUNNER_TEMP/p3-integration-$GITHUB_RUN_ID"
+          test ! -e "$candidate"
+          git worktree add --detach "$candidate" "$BASE_SHA"
+          for head in "$PROVIDER_SHA" "$DISPLAY_SHA"; do
+            git -C "$candidate" -c user.name='P3 Test CI' \
+              -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$head"
+          done
+          test_output="$RUNNER_TEMP/p3-test-output.txt"
+          accept_output="$RUNNER_TEMP/p3-acceptance-output.txt"
+          set +e
+          (cd "$candidate" && npm test) > "$test_output" 2>&1
+          test_exit=$?
+          (cd "$candidate" && node acceptance/run.mjs "$candidate") > "$accept_output" 2>&1
+          accept_exit=$?
+          set -e
+          merged_sha="$(git -C "$candidate" rev-parse HEAD)"
+          tree_sha="$(git -C "$candidate" rev-parse 'HEAD^{tree}')"
+          dirty=false
+          if ! git -C "$candidate" diff --check || [[ -n "$(git -C "$candidate" status --porcelain)" ]]; then
+            dirty=true
+          fi
+          workflow_blob_sha="$(git rev-parse HEAD:.github/workflows/p3-integration-evidence.yml)"
+          export P3_CANDIDATE="$candidate" P3_TEST_OUTPUT="$test_output" P3_ACCEPT_OUTPUT="$accept_output"
+          export P3_TEST_EXIT="$test_exit" P3_ACCEPT_EXIT="$accept_exit" P3_MERGED_SHA="$merged_sha"
+          export P3_TREE_SHA="$tree_sha" P3_DIRTY="$dirty" P3_WORKFLOW_BLOB_SHA="$workflow_blob_sha"
+          node -e '
+            const fs = require("node:fs");
+            const crypto = require("node:crypto");
+            const path = require("node:path");
+            const test = fs.readFileSync(process.env.P3_TEST_OUTPUT, "utf8");
+            const acceptance = fs.readFileSync(process.env.P3_ACCEPT_OUTPUT, "utf8");
+            const count = (key) => Number(test.match(new RegExp(`^# ${key} ([0-9]+)$`, "m"))?.[1] ?? 0);
+            const hash = (value) => crypto.createHash("sha256").update(value).digest("hex");
+            const testExit = Number(process.env.P3_TEST_EXIT);
+            const acceptExit = Number(process.env.P3_ACCEPT_EXIT);
+            const failed = testExit !== 0 || acceptExit !== 0 || process.env.P3_DIRTY !== "false";
+            const body = {
+              schema_version: 1, project_id: "demo-user-profile-p3", batch_id: process.env.P3_BATCH_ID,
+              base_sha: process.env.BASE_SHA, rules_sha: process.env.BASE_SHA,
+              contract_sha: process.env.BASE_SHA, acceptance_sha: process.env.BASE_SHA,
+              candidate_heads: [process.env.PROVIDER_SHA, process.env.DISPLAY_SHA],
+              trusted_workflow: `.github/workflows/p3-integration-evidence.yml@${process.env.P3_WORKFLOW_BLOB_SHA}`,
+              github_run_id: process.env.GITHUB_RUN_ID, github_run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+              github_head_sha: process.env.GITHUB_SHA, merged_sha: process.env.P3_MERGED_SHA,
+              tree_sha: process.env.P3_TREE_SHA, dirty: process.env.P3_DIRTY !== "false",
+              commands: [["git", "worktree", "add", "--detach", process.env.P3_CANDIDATE],
+                ["git", "merge", "--no-ff", process.env.PROVIDER_SHA],
+                ["git", "merge", "--no-ff", process.env.DISPLAY_SHA], ["npm", "test"],
+                ["node", "acceptance/run.mjs", process.env.P3_CANDIDATE]],
+              exit_code: failed ? 1 : 0, tests: { passed: count("pass"), failed: count("fail"), skipped: count("skipped") },
+              test_exit_code: testExit, acceptance_exit_code: acceptExit,
+              output_sha256: { test: hash(test), acceptance: hash(acceptance) },
+              error_code: failed ? "TESTS_FAILED" : null, affected_task_ids: [],
+              observed_at: new Date().toISOString(),
+            };
+            fs.writeFileSync(path.join(process.env.RUNNER_TEMP, "p3-batch-evidence.json"), JSON.stringify(body, null, 2) + "\n");
+          '
+          cat "$test_output"
+          cat "$accept_output"
+          test "$test_exit" -eq 0
+          test "$accept_exit" -eq 0
+          test "$dirty" = false
+      - name: Upload structured evidence even when acceptance fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-batch-evidence
+          path: ${{ runner.temp }}/p3-batch-evidence.json
+          if-no-files-found: error
+          retention-days: 7
