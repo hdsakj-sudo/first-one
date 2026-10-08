@@ -13,6 +13,7 @@
 | `tests/integration/` | 组合验收，不属于任何实现任务的写入范围 | A 独立验收 |
 | `acceptance/` | 开工前冻结、只在整合阶段运行的独立验收程序 | A 独立验收 |
 | `docs/` | 需求与验收基线 | A；改动必须记录原因 |
+| `.github/workflows/` | A 独立组合验收的只读 CI 工作流；命名 `p3-*.yml`，证据作为 CI artifact 保存，不进仓库 | 仅 A 的 CI 任务；业务实现 agent 禁改 |
 | `.local/` | 本机非敏感测试产物 | 本机；Git 忽略、默认保留 |
 
 新增文件按上表放置；模块代码使用英文小写文件名，测试文件以 `.test.js` 结尾。
@@ -27,6 +28,8 @@
   `src/display/**`、`tests/display/**`。实现任务不得修改 `AGENTS.md`、`contracts/**`、
   `docs/**`、`tests/integration/**`、`acceptance/**`、`package.json` 或 CI 配置。
 - 不通过删除或跳过失败测试来换取通过。结果是否通过由独立组合验收决定。
+- CI 仅在任务分支运行，权限最多 `contents: read`；不得自动合并、推送 `main`
+  或部署。工作流必须固定基线与候选 SHA，并把实际失败如实写入证据。
 - 不在本仓库写入密码、Token、登录文件、私钥、`.env` 或原始 Agent 会话。
 - 不自动删除 worktree、日志或 `.local/` 历史。确需清理时明确对象后另行批准。
 
