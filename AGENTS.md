@@ -13,6 +13,7 @@
 | `tests/integration/` | 组合验收，不属于任何实现任务的写入范围 | A 独立验收 |
 | `acceptance/` | 开工前冻结、只在整合阶段运行的独立验收程序 | A 独立验收 |
 | `docs/` | 需求与验收基线 | A；改动必须记录原因 |
+| `.github/workflows/` | 只读、无凭据的测试 CI；文件名使用 `p3-*.yml` | A 在单独授权的 CI 任务分支维护 |
 | `.local/` | 本机非敏感测试产物 | 本机；Git 忽略、默认保留 |
 
 新增文件按上表放置；模块代码使用英文小写文件名，测试文件以 `.test.js` 结尾。
@@ -26,6 +27,10 @@
 - provider 任务只能修改 `src/provider/**`、`tests/provider/**`；display 任务只能修改
   `src/display/**`、`tests/display/**`。实现任务不得修改 `AGENTS.md`、`contracts/**`、
   `docs/**`、`tests/integration/**`、`acceptance/**`、`package.json` 或 CI 配置。
+- `TASK-1003` 是 A 独立的测试 CI 任务，不属于上述业务实现任务；只在
+  `task/TASK-1003/**` 分支维护本文件与 `.github/workflows/p3-acceptance.yml`。
+  CI 只能只读拉取已固定的任务提交，在临时工作树组合并运行冻结验收；
+  不得推送、自动合并、使用密钥或部署。`main` 与原 P3 冻结基线保持不变。
 - 不通过删除或跳过失败测试来换取通过。结果是否通过由独立组合验收决定。
 - 不在本仓库写入密码、Token、登录文件、私钥、`.env` 或原始 Agent 会话。
 - 不自动删除 worktree、日志或 `.local/` 历史。确需清理时明确对象后另行批准。
