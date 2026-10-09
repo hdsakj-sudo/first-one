@@ -1,0 +1,173 @@
+name: TASK-1004 regression failure evidence
+
+on:
+  push:
+    branches:
+      - 'task/TASK-1003/TASK-1003-A3'
+
+permissions:
+  contents: read
+
+jobs:
+  independent-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out evidence workflow without write credentials
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use frozen Node major version
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Validate fixed regression case
+        shell: bash
+        env:
+          CASE_FILE: .github/workflows/task1004-regression-case.json
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A3'
+          [[ "$(node --version)" =~ ^v22\. ]]
+          node --input-type=module <<'NODE' >> "$GITHUB_ENV"
+          import fs from 'node:fs';
+          const data = JSON.parse(fs.readFileSync(process.env.CASE_FILE, 'utf8'));
+          const fields = {
+            PROJECT_ID: data.project_id,
+            BATCH_ID: data.batch_id,
+            CASE_BASE_SHA: data.base_sha,
+            CANDIDATE_TASK_ID: data.candidate_task_id,
+            CANDIDATE_BRANCH: data.candidate_branch,
+            CANDIDATE_SHA: data.candidate_sha,
+          };
+          for (const [key, value] of Object.entries(fields)) {
+            if (typeof value !== 'string' || /[\r\n]/.test(value)) throw new Error(`Invalid ${key}`);
+            console.log(`${key}=${value}`);
+          }
+          NODE
+          test "$PROJECT_ID" = 'a-codex-regression-20261008'
+          test "$BATCH_ID" = 'BATCH-1004'
+          test "$CASE_BASE_SHA" = 'a9434a87f6f2513e7c32185a8f9a6e365162e253'
+          test "$CANDIDATE_TASK_ID" = 'TASK-1004'
+          [[ "$CANDIDATE_BRANCH" =~ ^task/TASK-1004/TASK-1004-A[0-9]+$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Build exact candidate combination and record evidence
+        shell: bash
+        env:
+          BASE_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_SHA"
+          git fetch --no-tags origin \
+            "+refs/heads/$CANDIDATE_BRANCH:refs/remotes/origin/$CANDIDATE_BRANCH"
+          test "$(git rev-parse "refs/remotes/origin/$CANDIDATE_BRANCH")" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"
+
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/display/*|tests/display/*) ;;
+              *) echo "Display candidate changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$BASE_SHA" "$CANDIDATE_SHA")
+
+          candidate="$RUNNER_TEMP/task1004-regression-$GITHUB_RUN_ID"
+          test ! -e "$candidate"
+          git worktree add --detach "$candidate" "$BASE_SHA"
+          git -C "$candidate" -c user.name='Regression Evidence CI' \
+            -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$CANDIDATE_SHA"
+
+          test_output="$RUNNER_TEMP/task1004-test-output.txt"
+          acceptance_output="$RUNNER_TEMP/task1004-acceptance-output.txt"
+          set +e
+          (cd "$candidate" && npm test) > "$test_output" 2>&1
+          test_exit=$?
+          (cd "$candidate" && node acceptance/run.mjs "$candidate") > "$acceptance_output" 2>&1
+          acceptance_exit=$?
+          set -e
+
+          merged_sha="$(git -C "$candidate" rev-parse HEAD)"
+          tree_sha="$(git -C "$candidate" rev-parse 'HEAD^{tree}')"
+          dirty=false
+          if ! git -C "$candidate" diff --check || [[ -n "$(git -C "$candidate" status --porcelain)" ]]; then
+            dirty=true
+          fi
+
+          affected='[]'
+          if [[ "$acceptance_exit" -ne 0 ]] && \
+             grep -Fq 'src/display/render-user.js' "$acceptance_output" && \
+             [[ ! -f "$candidate/src/display/render-user.js" ]]; then
+            affected='["TASK-1004"]'
+          fi
+
+          workflow_blob_sha="$(git rev-parse HEAD:.github/workflows/p3-task1004-regression-evidence.yml)"
+          export CASE_CANDIDATE="$candidate" CASE_TEST_OUTPUT="$test_output"
+          export CASE_ACCEPTANCE_OUTPUT="$acceptance_output" CASE_TEST_EXIT="$test_exit"
+          export CASE_ACCEPTANCE_EXIT="$acceptance_exit" CASE_DIRTY="$dirty"
+          export CASE_MERGED_SHA="$merged_sha" CASE_TREE_SHA="$tree_sha"
+          export CASE_WORKFLOW_BLOB_SHA="$workflow_blob_sha" CASE_AFFECTED_TASK_IDS="$affected"
+
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const testOutput = fs.readFileSync(process.env.CASE_TEST_OUTPUT, 'utf8');
+          const acceptanceOutput = fs.readFileSync(process.env.CASE_ACCEPTANCE_OUTPUT, 'utf8');
+          const count = (key) => Number(testOutput.match(new RegExp(`^# ${key} ([0-9]+)$`, 'm'))?.[1] ?? 0);
+          const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
+          const testExit = Number(process.env.CASE_TEST_EXIT);
+          const acceptanceExit = Number(process.env.CASE_ACCEPTANCE_EXIT);
+          const dirty = process.env.CASE_DIRTY === 'true';
+          const failed = testExit !== 0 || acceptanceExit !== 0 || dirty;
+          const body = {
+            schema_version: 1,
+            project_id: process.env.PROJECT_ID,
+            batch_id: process.env.BATCH_ID,
+            base_sha: process.env.BASE_SHA,
+            rules_sha: process.env.BASE_SHA,
+            contract_sha: process.env.BASE_SHA,
+            acceptance_sha: process.env.BASE_SHA,
+            candidate_heads: [process.env.CANDIDATE_SHA],
+            trusted_workflow: `.github/workflows/p3-task1004-regression-evidence.yml@${process.env.CASE_WORKFLOW_BLOB_SHA}`,
+            github_run_id: process.env.GITHUB_RUN_ID,
+            github_run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            github_head_sha: process.env.GITHUB_SHA,
+            merged_sha: process.env.CASE_MERGED_SHA,
+            tree_sha: process.env.CASE_TREE_SHA,
+            dirty,
+            commands: [
+              ['git', 'worktree', 'add', '--detach', process.env.CASE_CANDIDATE, process.env.BASE_SHA],
+              ['git', 'merge', '--no-ff', process.env.CANDIDATE_SHA],
+              ['npm', 'test'],
+              ['node', 'acceptance/run.mjs', process.env.CASE_CANDIDATE],
+            ],
+            exit_code: failed ? 1 : 0,
+            tests: { passed: count('pass'), failed: count('fail'), skipped: count('skipped') },
+            test_exit_code: testExit,
+            acceptance_exit_code: acceptanceExit,
+            output_sha256: { test: hash(testOutput), acceptance: hash(acceptanceOutput) },
+            error_code: testExit !== 0 || acceptanceExit !== 0 ? 'TESTS_FAILED' : null,
+            affected_task_ids: JSON.parse(process.env.CASE_AFFECTED_TASK_IDS),
+            observed_at: new Date().toISOString(),
+          };
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'p3-batch-evidence.json'), JSON.stringify(body, null, 2) + '\n');
+          NODE
+
+          cat "$test_output"
+          cat "$acceptance_output"
+          test "$test_exit" -eq 0
+          test "$acceptance_exit" -eq 0
+          test "$dirty" = false
+
+      - name: Upload structured evidence even when acceptance fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: task1004-regression-evidence
+          path: ${{ runner.temp }}/p3-batch-evidence.json
+          if-no-files-found: error
+          retention-days: 7

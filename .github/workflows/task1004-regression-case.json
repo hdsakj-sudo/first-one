@@ -1,0 +1,8 @@
+{
+  "project_id": "a-codex-regression-20261008",
+  "batch_id": "BATCH-1004",
+  "base_sha": "a9434a87f6f2513e7c32185a8f9a6e365162e253",
+  "candidate_task_id": "TASK-1004",
+  "candidate_branch": "task/TASK-1004/TASK-1004-A1",
+  "candidate_sha": "88023aa01ff91b3d90eb513e7071b918b9e136cc"
+}
