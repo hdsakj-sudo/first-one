@@ -1,0 +1,152 @@
+name: TASK-1001-A2 independent combined acceptance
+
+on:
+  push:
+    branches:
+      - 'task/TASK-1003/TASK-1003-A4'
+
+permissions:
+  contents: read
+
+jobs:
+  independent-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out evidence branch without write credentials
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use frozen Node major version
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Verify exact candidates and record independent evidence
+        shell: bash
+        env:
+          BASE_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
+          PROVIDER_BRANCH: task/TASK-1001/TASK-1001-A2
+          PROVIDER_SHA: f43635429407fd34ea2af1c7ac7c5fe35772f7ca
+          DISPLAY_BRANCH: task/TASK-1002/TASK-1002-A3
+          DISPLAY_SHA: 349b4d6b456a8c0b89a72c8f2bf5c31d3d16544e
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A4'
+          [[ "$(node --version)" =~ ^v22\. ]]
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_SHA"
+
+          git fetch --no-tags origin \
+            "refs/heads/$PROVIDER_BRANCH:refs/remotes/origin/$PROVIDER_BRANCH" \
+            "refs/heads/$DISPLAY_BRANCH:refs/remotes/origin/$DISPLAY_BRANCH"
+          test "$(git rev-parse "refs/remotes/origin/$PROVIDER_BRANCH")" = "$PROVIDER_SHA"
+          test "$(git rev-parse "refs/remotes/origin/$DISPLAY_BRANCH")" = "$DISPLAY_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$PROVIDER_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$DISPLAY_SHA"
+
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/provider/*|tests/provider/*) ;;
+              *) echo "Provider changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$BASE_SHA" "$PROVIDER_SHA")
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/display/*|tests/display/*) ;;
+              *) echo "Display changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$BASE_SHA" "$DISPLAY_SHA")
+
+          candidate="$RUNNER_TEMP/p3-a2-combination-$GITHUB_RUN_ID"
+          test ! -e "$candidate"
+          git worktree add --detach "$candidate" "$BASE_SHA"
+          git -C "$candidate" -c user.name='P3 Test CI' \
+            -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$PROVIDER_SHA"
+          git -C "$candidate" -c user.name='P3 Test CI' \
+            -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$DISPLAY_SHA"
+
+          test_output="$RUNNER_TEMP/p3-a2-tests.txt"
+          acceptance_output="$RUNNER_TEMP/p3-a2-acceptance.txt"
+          set +e
+          (cd "$candidate" && npm test) > "$test_output" 2>&1
+          test_exit=$?
+          (cd "$candidate" && node acceptance/run.mjs "$candidate") > "$acceptance_output" 2>&1
+          acceptance_exit=$?
+          set -e
+
+          merged_sha="$(git -C "$candidate" rev-parse HEAD)"
+          tree_sha="$(git -C "$candidate" rev-parse 'HEAD^{tree}')"
+          dirty=false
+          if ! git -C "$candidate" diff --check || [[ -n "$(git -C "$candidate" status --porcelain)" ]]; then
+            dirty=true
+          fi
+          workflow_blob_sha="$(git rev-parse "$GITHUB_SHA:.github/workflows/p3-task1001-a2-independent-evidence.yml")"
+
+          export EVIDENCE_PATH="$RUNNER_TEMP/p3-candidate-combination-evidence.json"
+          export CANDIDATE_WORKTREE="$candidate"
+          export TEST_OUTPUT="$test_output" ACCEPTANCE_OUTPUT="$acceptance_output"
+          export TEST_EXIT="$test_exit" ACCEPTANCE_EXIT="$acceptance_exit"
+          export MERGED_SHA="$merged_sha" TREE_SHA="$tree_sha" DIRTY="$dirty"
+          export WORKFLOW_BLOB_SHA="$workflow_blob_sha"
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          const testOutput = fs.readFileSync(process.env.TEST_OUTPUT, 'utf8');
+          const acceptanceOutput = fs.readFileSync(process.env.ACCEPTANCE_OUTPUT, 'utf8');
+          const count = (key) => Number(testOutput.match(new RegExp(`^# ${key} ([0-9]+)$`, 'm'))?.[1] ?? 0);
+          const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
+          const testExit = Number(process.env.TEST_EXIT);
+          const acceptanceExit = Number(process.env.ACCEPTANCE_EXIT);
+          const dirty = process.env.DIRTY === 'true';
+          const failed = testExit !== 0 || acceptanceExit !== 0 || dirty;
+          const evidence = {
+            schema_version: 1,
+            evidence_kind: 'candidate_combination',
+            base_sha: 'a9434a87f6f2513e7c32185a8f9a6e365162e253',
+            candidate_heads: {
+              provider: 'f43635429407fd34ea2af1c7ac7c5fe35772f7ca',
+              display: '349b4d6b456a8c0b89a72c8f2bf5c31d3d16544e',
+            },
+            trusted_workflow: `.github/workflows/p3-task1001-a2-independent-evidence.yml@${process.env.WORKFLOW_BLOB_SHA}`,
+            github_run_id: process.env.GITHUB_RUN_ID,
+            github_run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            github_head_sha: process.env.GITHUB_SHA,
+            candidate_worktree: process.env.CANDIDATE_WORKTREE,
+            merged_sha: process.env.MERGED_SHA,
+            tree_sha: process.env.TREE_SHA,
+            dirty,
+            commands: [
+              ['git', 'worktree', 'add', '--detach', process.env.CANDIDATE_WORKTREE, process.env.BASE_SHA],
+              ['git', 'merge', '--no-ff', process.env.PROVIDER_SHA],
+              ['git', 'merge', '--no-ff', process.env.DISPLAY_SHA],
+              ['npm', 'test'],
+              ['node', 'acceptance/run.mjs'],
+            ],
+            exit_code: failed ? 1 : 0,
+            tests: { passed: count('pass'), failed: count('fail'), skipped: count('skipped') },
+            test_exit_code: testExit,
+            acceptance_exit_code: acceptanceExit,
+            output_sha256: { tests: hash(testOutput), acceptance: hash(acceptanceOutput) },
+            error_code: failed ? 'TESTS_FAILED' : null,
+            observed_at: new Date().toISOString(),
+          };
+          fs.writeFileSync(process.env.EVIDENCE_PATH, JSON.stringify(evidence, null, 2) + '\n');
+          NODE
+
+          cat "$test_output"
+          cat "$acceptance_output"
+          test "$test_exit" -eq 0
+          test "$acceptance_exit" -eq 0
+          test "$dirty" = false
+
+      - name: Upload structured evidence even when acceptance fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p3-candidate-a2-combination-evidence
+          path: ${{ runner.temp }}/p3-candidate-combination-evidence.json
+          if-no-files-found: error
+          retention-days: 7
