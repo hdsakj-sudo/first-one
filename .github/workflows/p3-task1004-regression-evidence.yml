@@ -25,14 +25,12 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
-      - name: Validate fixed regression case
+      - name: Load regression case values
         shell: bash
         env:
           CASE_FILE: .github/workflows/task1004-regression-case.json
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A3'
-          [[ "$(node --version)" =~ ^v22\. ]]
           node --input-type=module <<'NODE' >> "$GITHUB_ENV"
           import fs from 'node:fs';
           const data = JSON.parse(fs.readFileSync(process.env.CASE_FILE, 'utf8'));
@@ -49,6 +47,13 @@ jobs:
             console.log(`${key}=${value}`);
           }
           NODE
+
+      - name: Validate fixed regression case
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A3'
+          [[ "$(node --version)" =~ ^v22\. ]]
           test "$PROJECT_ID" = 'a-codex-regression-20261008'
           test "$BATCH_ID" = 'BATCH-1004'
           test "$CASE_BASE_SHA" = 'a9434a87f6f2513e7c32185a8f9a6e365162e253'
