@@ -38,6 +38,8 @@ jobs:
             PROJECT_ID: data.project_id,
             BATCH_ID: data.batch_id,
             CASE_BASE_SHA: data.base_sha,
+            SUPPORT_BRANCH: data.support_provider_branch,
+            SUPPORT_SHA: data.support_provider_sha,
             CANDIDATE_TASK_ID: data.candidate_task_id,
             CANDIDATE_BRANCH: data.candidate_branch,
             CANDIDATE_SHA: data.candidate_sha,
@@ -57,6 +59,9 @@ jobs:
           test "$PROJECT_ID" = 'a-codex-regression-20261008'
           test "$BATCH_ID" = 'BATCH-1004'
           test "$CASE_BASE_SHA" = 'a9434a87f6f2513e7c32185a8f9a6e365162e253'
+          [[ "$SUPPORT_BRANCH" =~ ^task/TASK-1001/TASK-1001-A[0-9]+$ ]]
+          [[ "$SUPPORT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$SUPPORT_SHA" = '75d357a64dbc9a2d47c92adf4050f2bf26b2bcf0'
           test "$CANDIDATE_TASK_ID" = 'TASK-1004'
           [[ "$CANDIDATE_BRANCH" =~ ^task/TASK-1004/TASK-1004-A[0-9]+$ ]]
           [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
@@ -69,10 +74,19 @@ jobs:
           set -euo pipefail
           test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_SHA"
           git fetch --no-tags origin \
+            "+refs/heads/$SUPPORT_BRANCH:refs/remotes/origin/$SUPPORT_BRANCH" \
             "+refs/heads/$CANDIDATE_BRANCH:refs/remotes/origin/$CANDIDATE_BRANCH"
+          test "$(git rev-parse "refs/remotes/origin/$SUPPORT_BRANCH")" = "$SUPPORT_SHA"
           test "$(git rev-parse "refs/remotes/origin/$CANDIDATE_BRANCH")" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$BASE_SHA" "$SUPPORT_SHA"
           git merge-base --is-ancestor "$BASE_SHA" "$CANDIDATE_SHA"
 
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/provider/*|tests/provider/*) ;;
+              *) echo "Provider support candidate changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$BASE_SHA" "$SUPPORT_SHA")
           while IFS= read -r -d '' path; do
             case "$path" in
               src/display/*|tests/display/*) ;;
@@ -83,6 +97,8 @@ jobs:
           candidate="$RUNNER_TEMP/task1004-regression-$GITHUB_RUN_ID"
           test ! -e "$candidate"
           git worktree add --detach "$candidate" "$BASE_SHA"
+          git -C "$candidate" -c user.name='Regression Evidence CI' \
+            -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$SUPPORT_SHA"
           git -C "$candidate" -c user.name='Regression Evidence CI' \
             -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$CANDIDATE_SHA"
 
@@ -146,6 +162,7 @@ jobs:
             dirty,
             commands: [
               ['git', 'worktree', 'add', '--detach', process.env.CASE_CANDIDATE, process.env.BASE_SHA],
+              ['git', 'merge', '--no-ff', process.env.SUPPORT_SHA],
               ['git', 'merge', '--no-ff', process.env.CANDIDATE_SHA],
               ['npm', 'test'],
               ['node', 'acceptance/run.mjs', process.env.CASE_CANDIDATE],
