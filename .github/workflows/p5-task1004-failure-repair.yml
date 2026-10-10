@@ -1,0 +1,238 @@
+name: P5 TASK-1004 failure and repair evidence
+
+on:
+  push:
+    branches:
+      - 'task/TASK-1003/TASK-1003-A8-p5-repair-evidence'
+
+permissions:
+  contents: read
+
+jobs:
+  independent-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out evidence workflow without write credentials
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use frozen Node major version
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Load fixed P5 case
+        shell: bash
+        env:
+          CASE_FILE: .github/workflows/p5-task1004-case.json
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE' >> "$GITHUB_ENV"
+          import fs from 'node:fs';
+          const data = JSON.parse(fs.readFileSync(process.env.CASE_FILE, 'utf8'));
+          const fields = {
+            PROJECT_ID: data.project_id,
+            BATCH_ID: data.batch_id,
+            BASE_SHA: data.base_sha,
+            SUPPORT_BRANCH: data.support_provider_branch,
+            SUPPORT_SHA: data.support_provider_sha,
+            CANDIDATE_TASK_ID: data.candidate_task_id,
+            CANDIDATE_BRANCH: data.candidate_branch,
+            CANDIDATE_SHA: data.candidate_sha,
+            EXPECTED_CONCLUSION: data.expected_conclusion,
+          };
+          for (const [key, value] of Object.entries(fields)) {
+            if (typeof value !== 'string' || /[\r\n]/.test(value)) throw new Error(`Invalid ${key}`);
+            console.log(`${key}=${value}`);
+          }
+          NODE
+
+      - name: Validate fixed P5 case
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A8-p5-repair-evidence'
+          [[ "$(node --version)" =~ ^v22\. ]]
+          test "$PROJECT_ID" = 'a-codex-regression-20261008'
+          [[ "$BATCH_ID" =~ ^BATCH-100[56]$ ]]
+          test "$BASE_SHA" = 'a9434a87f6f2513e7c32185a8f9a6e365162e253'
+          test "$SUPPORT_BRANCH" = 'task/TASK-1001/TASK-1001-A4'
+          test "$SUPPORT_SHA" = 'e43b9ce247fb73754887ecb3dd220a866236f9ab'
+          test "$CANDIDATE_TASK_ID" = 'TASK-1004'
+          [[ "$CANDIDATE_BRANCH" =~ ^task/TASK-1004/TASK-1004-A[0-9]+$ ]]
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$EXPECTED_CONCLUSION" in
+            failed)
+              test "$BATCH_ID" = 'BATCH-1005'
+              test "$CANDIDATE_BRANCH" = 'task/TASK-1004/TASK-1004-A3'
+              test "$CANDIDATE_SHA" = 'd652adf3ad29a8a197f5a2a2f5d7733fd8df5d32'
+              ;;
+            passed)
+              test "$BATCH_ID" = 'BATCH-1006'
+              test "$CANDIDATE_BRANCH" = 'task/TASK-1004/TASK-1004-A4'
+              ;;
+            *) echo 'Unsupported expected conclusion' >&2; exit 1 ;;
+          esac
+
+      - name: Build exact candidate combination and record evidence
+        shell: bash
+        env:
+          FROZEN_BASE_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
+        run: |
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$FROZEN_BASE_SHA"
+          git fetch --no-tags origin \
+            "+refs/heads/$SUPPORT_BRANCH:refs/remotes/origin/$SUPPORT_BRANCH" \
+            "+refs/heads/$CANDIDATE_BRANCH:refs/remotes/origin/$CANDIDATE_BRANCH"
+          test "$(git rev-parse "refs/remotes/origin/$SUPPORT_BRANCH")" = "$SUPPORT_SHA"
+          test "$(git rev-parse "refs/remotes/origin/$CANDIDATE_BRANCH")" = "$CANDIDATE_SHA"
+          git merge-base --is-ancestor "$FROZEN_BASE_SHA" "$SUPPORT_SHA"
+          git merge-base --is-ancestor "$FROZEN_BASE_SHA" "$CANDIDATE_SHA"
+
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/provider/*|tests/provider/*) ;;
+              *) echo "Provider support candidate changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$FROZEN_BASE_SHA" "$SUPPORT_SHA")
+          while IFS= read -r -d '' path; do
+            case "$path" in
+              src/display/*|tests/display/*) ;;
+              *) echo "Display candidate changed forbidden path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only -z "$FROZEN_BASE_SHA" "$CANDIDATE_SHA")
+
+          candidate="$RUNNER_TEMP/p5-task1004-$GITHUB_RUN_ID"
+          test ! -e "$candidate"
+          git worktree add --detach "$candidate" "$FROZEN_BASE_SHA"
+          git -C "$candidate" -c user.name='P5 Evidence CI' \
+            -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$SUPPORT_SHA"
+          git -C "$candidate" -c user.name='P5 Evidence CI' \
+            -c user.email='ci@users.noreply.github.com' merge --no-ff --no-edit "$CANDIDATE_SHA"
+
+          test_output="$RUNNER_TEMP/p5-test-output.txt"
+          acceptance_output="$RUNNER_TEMP/p5-acceptance-output.txt"
+          set +e
+          (cd "$candidate" && npm test) > "$test_output" 2>&1
+          test_exit=$?
+          (cd "$candidate" && node acceptance/run.mjs "$candidate") > "$acceptance_output" 2>&1
+          acceptance_exit=$?
+          set -e
+
+          merged_sha="$(git -C "$candidate" rev-parse HEAD)"
+          tree_sha="$(git -C "$candidate" rev-parse 'HEAD^{tree}')"
+          dirty=false
+          if ! git -C "$candidate" diff --check || [[ -n "$(git -C "$candidate" status --porcelain)" ]]; then
+            dirty=true
+          fi
+
+          affected='[]'
+          fault_confirmed=false
+          if [[ "$test_exit" -eq 0 && "$acceptance_exit" -ne 0 ]] && \
+             grep -Fq 'Ada (undefined)' "$acceptance_output" && \
+             grep -Fq 'Ada (u-1)' "$acceptance_output"; then
+            affected='["TASK-1004"]'
+            fault_confirmed=true
+          fi
+
+          workflow_blob_sha="$(git rev-parse HEAD:.github/workflows/p5-task1004-failure-repair.yml)"
+          export P5_CANDIDATE="$candidate" P5_TEST_OUTPUT="$test_output"
+          export P5_ACCEPTANCE_OUTPUT="$acceptance_output" P5_TEST_EXIT="$test_exit"
+          export P5_ACCEPTANCE_EXIT="$acceptance_exit" P5_DIRTY="$dirty"
+          export P5_MERGED_SHA="$merged_sha" P5_TREE_SHA="$tree_sha"
+          export P5_WORKFLOW_BLOB_SHA="$workflow_blob_sha" P5_AFFECTED="$affected"
+          export P5_FAULT_CONFIRMED="$fault_confirmed"
+
+          node --input-type=module <<'NODE'
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const testOutput = fs.readFileSync(process.env.P5_TEST_OUTPUT, 'utf8');
+          const acceptanceOutput = fs.readFileSync(process.env.P5_ACCEPTANCE_OUTPUT, 'utf8');
+          const count = (key) => Number(testOutput.match(new RegExp(`^# ${key} ([0-9]+)$`, 'm'))?.[1] ?? 0);
+          const hash = (value) => crypto.createHash('sha256').update(value).digest('hex');
+          const testExit = Number(process.env.P5_TEST_EXIT);
+          const acceptanceExit = Number(process.env.P5_ACCEPTANCE_EXIT);
+          const dirty = process.env.P5_DIRTY === 'true';
+          const failed = testExit !== 0 || acceptanceExit !== 0 || dirty;
+          const body = {
+            schema_version: 1,
+            project_id: process.env.PROJECT_ID,
+            batch_id: process.env.BATCH_ID,
+            base_sha: process.env.FROZEN_BASE_SHA,
+            rules_sha: process.env.FROZEN_BASE_SHA,
+            contract_sha: process.env.FROZEN_BASE_SHA,
+            acceptance_sha: process.env.FROZEN_BASE_SHA,
+            candidate_heads: [process.env.CANDIDATE_SHA],
+            trusted_workflow: `.github/workflows/p5-task1004-failure-repair.yml@${process.env.P5_WORKFLOW_BLOB_SHA}`,
+            github_run_id: process.env.GITHUB_RUN_ID,
+            github_run_attempt: process.env.GITHUB_RUN_ATTEMPT,
+            github_head_sha: process.env.GITHUB_SHA,
+            merged_sha: process.env.P5_MERGED_SHA,
+            tree_sha: process.env.P5_TREE_SHA,
+            dirty,
+            commands: [
+              ['git', 'worktree', 'add', '--detach', process.env.P5_CANDIDATE, process.env.FROZEN_BASE_SHA],
+              ['git', 'merge', '--no-ff', '--no-edit', process.env.SUPPORT_SHA],
+              ['git', 'merge', '--no-ff', '--no-edit', process.env.CANDIDATE_SHA],
+              ['npm', 'test'],
+              ['node', 'acceptance/run.mjs', process.env.P5_CANDIDATE],
+            ],
+            exit_code: failed ? 1 : 0,
+            tests: { passed: count('pass'), failed: count('fail'), skipped: count('skipped') },
+            test_exit_code: testExit,
+            acceptance_exit_code: acceptanceExit,
+            output_sha256: { test: hash(testOutput), acceptance: hash(acceptanceOutput) },
+            error_code: failed ? 'TESTS_FAILED' : null,
+            affected_task_ids: JSON.parse(process.env.P5_AFFECTED),
+            observed_at: new Date().toISOString(),
+          };
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'p3-batch-evidence.json'), JSON.stringify(body, null, 2) + '\n');
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'p5-fault-confirmed.txt'), process.env.P5_FAULT_CONFIRMED + '\n');
+          NODE
+
+          cat "$test_output"
+          cat "$acceptance_output"
+
+      - name: Upload structured evidence even when the combination fails
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p5-task1004-evidence
+          path: |
+            ${{ runner.temp }}/p3-batch-evidence.json
+            ${{ runner.temp }}/p5-fault-confirmed.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Enforce the expected P5 outcome
+        if: always()
+        shell: bash
+        env:
+          EVIDENCE_FILE: ${{ runner.temp }}/p3-batch-evidence.json
+          FAULT_FILE: ${{ runner.temp }}/p5-fault-confirmed.txt
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const evidence = JSON.parse(fs.readFileSync(process.env.EVIDENCE_FILE, 'utf8'));
+          const faultConfirmed = fs.readFileSync(process.env.FAULT_FILE, 'utf8').trim() === 'true';
+          if (process.env.EXPECTED_CONCLUSION === 'failed') {
+            if (!faultConfirmed || evidence.test_exit_code !== 0 || evidence.acceptance_exit_code === 0 ||
+                evidence.error_code !== 'TESTS_FAILED' || evidence.affected_task_ids.join(',') !== 'TASK-1004') {
+              throw new Error('Expected P5 userId mismatch with TASK-1004 attribution was not observed');
+            }
+            console.log('Expected P5 failure recorded; returning nonzero so Worker independently sees a failed run.');
+            process.exit(1);
+          }
+          if (process.env.EXPECTED_CONCLUSION !== 'passed' || evidence.exit_code !== 0 ||
+              evidence.test_exit_code !== 0 || evidence.acceptance_exit_code !== 0 ||
+              evidence.error_code !== null || evidence.affected_task_ids.length !== 0) {
+            throw new Error('Expected repaired P5 combination to pass was not observed');
+          }
+          console.log('Repaired P5 combination passed.');
+          NODE
