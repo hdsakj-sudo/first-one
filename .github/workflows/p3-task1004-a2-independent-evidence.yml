@@ -3,7 +3,7 @@ name: TASK-1001-A4 plus TASK-1004-A2 independent acceptance
 on:
   push:
     branches:
-      - 'task/TASK-1003/TASK-1003-A6'
+      - 'task/TASK-1003/TASK-1003-A7-evidence-format'
 
 permissions:
   contents: read
@@ -29,8 +29,8 @@ jobs:
         shell: bash
         env:
           BASE_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
-          PROJECT_ID: a-codex-regression-20261010
-          BATCH_ID: BATCH-1004
+          PROJECT_ID: a-codex-regression-20261010b
+          BATCH_ID: BATCH-1005
           RULES_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
           CONTRACT_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
           ACCEPTANCE_SHA: a9434a87f6f2513e7c32185a8f9a6e365162e253
@@ -40,7 +40,7 @@ jobs:
           DISPLAY_SHA: 31f3787a87ffacd30dae2c272a6046c9be5b5e5c
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A6'
+          test "$GITHUB_REF" = 'refs/heads/task/TASK-1003/TASK-1003-A7-evidence-format'
           [[ "$(node --version)" =~ ^v22\. ]]
           test "$(git ls-remote origin refs/heads/main | cut -f1)" = "$BASE_SHA"
 
@@ -90,7 +90,7 @@ jobs:
           fi
           workflow_blob_sha="$(git rev-parse "$GITHUB_SHA:.github/workflows/p3-task1004-a2-independent-evidence.yml")"
 
-          export EVIDENCE_PATH="$RUNNER_TEMP/p3-task1004-a2-combination-evidence.json"
+          export EVIDENCE_PATH="$RUNNER_TEMP/p3-batch-evidence.json"
           export CANDIDATE_WORKTREE="$candidate"
           export TEST_OUTPUT="$test_output" ACCEPTANCE_OUTPUT="$acceptance_output"
           export TEST_EXIT="$test_exit" ACCEPTANCE_EXIT="$acceptance_exit"
@@ -153,6 +153,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: p3-task1004-a2-combination-evidence
-          path: ${{ runner.temp }}/p3-task1004-a2-combination-evidence.json
+          path: ${{ runner.temp }}/p3-batch-evidence.json
           if-no-files-found: error
           retention-days: 7
