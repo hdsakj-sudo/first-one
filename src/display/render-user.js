@@ -1,3 +1,3 @@
 export function renderUser(profile) {
-  return `${profile.name} (${profile.userId})`;
+  return `${profile.name} (${profile.id})`;
 }
